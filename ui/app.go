@@ -3,19 +3,26 @@ package ui
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"ssha/db"
 	"ssha/models"
-	"ssha/sshc" // Or ssha/ssh, make sure it matches your folder name
+	"ssha/sshc"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
+// Model represents the UI state
 type model struct {
-	table table.Model
-	hosts []models.Host
-	err   error // Add error field
+	table    table.Model
+	hosts    []models.Host
+	filtered []models.Host
+	search   textinput.Model
+	mode     string
+	selected int
+	err      error
 }
 
 func initialModel() model {
@@ -27,79 +34,106 @@ func initialModel() model {
 		{Title: "User", Width: 15},
 		{Title: "Port", Width: 5},
 	}
-
-	var rows []table.Row
-	for _, h := range hosts {
-		rows = append(rows, table.Row{h.Alias, h.Hostname, h.User, fmt.Sprintf("%d", h.Port)})
-	}
-
-	t := table.New(
+	rows := makeRows(hosts)
+	tbl := table.New(
 		table.WithColumns(columns),
 		table.WithRows(rows),
 		table.WithFocused(true),
 		table.WithHeight(7),
 	)
 
-	s := table.DefaultStyles()
-	s.Header = s.Header.
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("240")).
-		BorderBottom(true)
-	s.Selected = s.Selected.
-		Foreground(lipgloss.Color("229")).
-		Background(lipgloss.Color("57")).
-		Bold(false)
-	t.SetStyles(s)
+	search := textinput.New()
+	search.Placeholder = "Type to search..."
+	search.Focus()
 
-	return model{table: t, hosts: hosts}
+	return model{
+		table:    tbl,
+		hosts:    hosts,
+		filtered: hosts,
+		search:   search,
+		mode:     "search",
+	}
+}
+
+func makeRows(hosts []models.Host) []table.Row {
+	var rows []table.Row
+	for _, h := range hosts {
+		rows = append(rows, table.Row{h.Alias, h.Hostname, h.User, fmt.Sprintf("%d", h.Port)})
+	}
+	return rows
 }
 
 func (m model) Init() tea.Cmd {
-	return nil
+	return textinput.Blink
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "esc", "q":
+		case "ctrl+c":
 			return m, tea.Quit
+		case "ctrl+n":
+			fmt.Println("[ADD HOST] Dialog should open.")
+		case "ctrl+k":
+			fmt.Println("[UPDATE HOST] Dialog for", m.filtered[m.selected])
+		case "ctrl+d":
+			fmt.Println("[DELETE HOST] Confirm deleting", m.filtered[m.selected])
 		case "enter":
 			selectedRow := m.table.SelectedRow()
 			if selectedRow != nil {
 				index := m.table.Cursor()
 				host := m.hosts[index]
+				// fmt.Print("\033[H\033[2J")
+				cmd := exec.Command("clear")
+				cmd.Stdout = os.Stdout
+				_ = cmd.Run()
 				if host.SecurityType == "password" {
-					m.err = sshc.SSHintoHostViaPassword(host) // Store the error
-
+					m.err = sshc.SSHintoHostViaPassword(host)
 				} else {
-					m.err = sshc.SSHintoHostViaPrivateKey(host) // Store the error
-
+					m.err = sshc.SSHintoHostViaPrivateKey(host)
 				}
 				if m.err != nil {
-					return m, nil // Don't quit on error, show the error
+					return m, nil
 				}
-				return m, tea.Quit // Quit only on successful connection
+				return m, tea.Quit
+			}
+			return m, tea.Quit
+		default:
+			if msg.String() == "up" || msg.String() == "down" {
+				m.table, _ = m.table.Update(msg)
+				m.selected = m.table.Cursor()
+			} else {
+				m.search, _ = m.search.Update(msg)
+				m.filterHosts()
 			}
 		}
 	}
+	return m, nil
+}
 
-	var cmd tea.Cmd
-	m.table, cmd = m.table.Update(msg)
-	return m, cmd
+func (m *model) filterHosts() {
+	query := strings.ToLower(m.search.Value())
+	var filtered []models.Host
+	for _, host := range m.hosts {
+		if strings.Contains(strings.ToLower(host.Alias), query) {
+			filtered = append(filtered, host)
+		}
+	}
+	m.filtered = filtered
+	m.table.SetRows(makeRows(filtered))
+	m.table.SetCursor(0)
+	m.selected = 0
 }
 
 func (m model) View() string {
-	if m.err != nil {
-		return fmt.Sprintf("Error: %v\n\n%s", m.err, m.table.View()) // Display error
-	}
-	return m.table.View()
+	return fmt.Sprintf("%s\n%s", m.search.View(), m.table.View())
 }
 
 func Run() {
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
+	p := tea.NewProgram(initialModel())
 	if _, err := p.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Alas, there's been an error: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: %v", err)
 		os.Exit(1)
 	}
 }
